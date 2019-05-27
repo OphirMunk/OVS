@@ -7430,7 +7430,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
         VLOG_WARN("Packet dropped. Max recirculation depth exceeded.");
         break;
 
-    case OVS_ACTION_ATTR_CT: {
+    case OVS_ACTION_ATTR_CT: { // OMREVIEW - netdev parsing of CT
         const struct nlattr *b;
         bool force = false;
         bool commit = false;
@@ -7449,24 +7449,31 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
 
             switch(sub_type) {
             case OVS_CT_ATTR_FORCE_COMMIT:
+                VLOG_ERR("===> got action CT force commit\n");
                 force = true;
                 /* fall through. */
             case OVS_CT_ATTR_COMMIT:
+                VLOG_ERR("===> got action CT commit\n");
                 commit = true;
                 break;
             case OVS_CT_ATTR_ZONE:
+                VLOG_ERR("===> got action CT zone\n");
                 zone = nl_attr_get_u16(b);
                 break;
             case OVS_CT_ATTR_HELPER:
+                VLOG_ERR("===> got action CT helper\n");
                 helper = nl_attr_get_string(b);
                 break;
             case OVS_CT_ATTR_MARK:
+                VLOG_ERR("===> got action CT mark\n");
                 setmark = nl_attr_get(b);
                 break;
             case OVS_CT_ATTR_LABELS:
+                VLOG_ERR("===> got action CT labels\n");
                 setlabel = nl_attr_get(b);
                 break;
             case OVS_CT_ATTR_EVENTMASK:
+                VLOG_ERR("===> got action CT eventmask\n");
                 /* Silently ignored, as userspace datapath does not generate
                  * netlink events. */
                 break;

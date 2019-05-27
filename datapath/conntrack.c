@@ -1660,7 +1660,7 @@ bool ovs_ct_verify(struct net *net, enum ovs_key_attr attr)
 	return false;
 }
 
-int ovs_ct_copy_action(struct net *net, const struct nlattr *attr,
+int ovs_ct_copy_action(struct net *net, const struct nlattr *attr, // OMREVIEW - this is where ct is copied
 		       const struct sw_flow_key *key,
 		       struct sw_flow_actions **sfa,  bool log)
 {

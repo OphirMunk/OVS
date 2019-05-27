@@ -1545,6 +1545,44 @@ netdev_vport_vxlan_add_rte_flow_offload(struct netdev_rte_port *rte_port,
                 continue;
             }
             action_bitmap |= (1 << OVS_ACTION_ATTR_OUTPUT);
+        } else if ((enum ovs_action_attr)type == OVS_ACTION_ATTR_CT) {
+            const struct nlattr *b;
+            unsigned int ct_left;
+            uint16_t zone = 0;
+
+            NL_ATTR_FOR_EACH_UNSAFE (b, ct_left, nl_attr_get(a),
+                    nl_attr_get_size(a)) {
+                enum ovs_ct_attr sub_type = nl_attr_type(b);
+
+                switch(sub_type) {
+                    case OVS_CT_ATTR_ZONE:
+                    /* currently only support zone 0 */
+                        zone = nl_attr_get_u16(b);
+                        if (zone) {
+                            ret = EOPNOTSUPP;
+                            goto out;
+                        }
+                        break;
+                    case OVS_CT_ATTR_COMMIT:
+                    case OVS_CT_ATTR_FORCE_COMMIT:
+                    case OVS_CT_ATTR_HELPER:
+                    case OVS_CT_ATTR_MARK:
+                    case OVS_CT_ATTR_LABELS:
+                    case OVS_CT_ATTR_EVENTMASK:
+                    case OVS_CT_ATTR_NAT:
+                       break;
+                    case OVS_CT_ATTR_UNSPEC:
+                    case __OVS_CT_ATTR_MAX:
+                        OVS_NOT_REACHED();
+                }
+            }
+            action_bitmap |= (1 << OVS_ACTION_ATTR_CT);
+        } else if ((enum ovs_action_attr)type == OVS_ACTION_ATTR_RECIRC) {
+            if (!(ovs_action_attr & (1 << OVS_ACTION_ATTR_CT))) {
+                ret = EOPNOTSUPP;
+		goto out;
+	    }
+            action_bitmap |= (1 << OVS_ACTION_ATTR_RECIRC);
         } else {
             /* Unsupported action for offloading */
             ret = EOPNOTSUPP;
