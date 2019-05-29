@@ -2500,7 +2500,7 @@ static void ct_offload_print_log(struct ct_flow_offload_item *item)
 
     ipv4 = &item->ct_modify.ipv4;
 
-    if(item->mod_flags){
+    if (item->mod_flags) {
         VLOG_ERR("nat flags are on");
     }
 
