@@ -2662,7 +2662,7 @@ ct_offload_add_item(struct ct_flow_offload_item *item,struct pkt_metadata *md)
         return;
     }
 
-    offload = dp_ct_alloc_ct_offload(item, md);
+    offload = dp_ct_alloc_ct_offload(item, md); // OMREVIEW - how do we know the difference between add and del (calling the same api in ct_offload_del_item() as well)?
     dp_netdev_append_ct_offload(offload);
 }
 

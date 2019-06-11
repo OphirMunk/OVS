@@ -274,17 +274,17 @@ struct ct_flow_offload_item {
     union {
         struct ovs_key_ct_tuple_ipv4 ipv4;
         struct ovs_key_ct_tuple_ipv6 ipv6;
-    } ct_key;
+    } ct_key; // by roni: it is the same key for both CT directions
 
     union {
         struct ovs_key_ct_tuple_ipv4 ipv4;
         struct ovs_key_ct_tuple_ipv6 ipv6;
-    } ct_match;
+    } ct_match; // by roni: it is the match
 
     union {
         struct ovs_key_ct_tuple_ipv4 ipv4;
         struct ovs_key_ct_tuple_ipv6 ipv6;
-    } ct_modify;
+    } ct_modify; // by roni: it is the entries to enter to CT NAT
 
 };
 

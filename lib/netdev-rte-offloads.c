@@ -28,7 +28,20 @@
 #include "uuid.h"
 
 #define VXLAN_EXCEPTION_MARK (MIN_RESERVED_MARK + 0)
-#define VXLAN_TABLE_ID       1
+
+/* Skip flow table 0 which is usually used by entities other than OVS.
+ * The flow tables numbers must be in increasing order such that any jump from
+ * one table to another will be from a lower to a higher id. It is a generic
+ * rule to avoid loops.
+ */
+enum table_id {
+    base_table_id = 1, /* Skip flow table 0 */
+    vxlan_table_id,
+    conntrack_table_id,
+    recirc_table_id,
+};
+
+#define BITMAP(attr) (1 << attr)
 
 VLOG_DEFINE_THIS_MODULE(netdev_rte_offloads);
 static struct vlog_rate_limit error_rl = VLOG_RATE_LIMIT_INIT(100, 5);
@@ -1086,7 +1099,7 @@ netdev_rte_offloads_add_flow(struct netdev *netdev,
     NL_ATTR_FOR_EACH_UNSAFE (a, left, nl_actions, actions_len) {
         int type = nl_attr_type(a);
         if ((enum ovs_action_attr) type == OVS_ACTION_ATTR_TUNNEL_POP) {
-            vport = netdev_rte_add_jump_flow_action(a, &jump, &actions);
+            vport = netdev_rte_add_jump_flow_action(a, &jump, &actions); // OMREVIEW - why is this needed? It's obvious we jump to vxlan table. In the function it is redundant.
             if (!vport) {
                 result = -1;
                 break;
@@ -1102,7 +1115,8 @@ netdev_rte_offloads_add_flow(struct netdev *netdev,
             }
             netdev_rte_add_count_flow_action(&count, &actions);
             netdev_rte_add_port_id_flow_action(&output, &actions);
-            action_bitmap |= 1 << OVS_ACTION_ATTR_OUTPUT;
+            // action_bitmap |= 1 << OVS_ACTION_ATTR_OUTPUT;
+            action_bitmap |= BITMAP(OVS_ACTION_ATTR_OUTPUT);
 
         } else if ((enum ovs_action_attr) type == OVS_ACTION_ATTR_CLONE) {
             result = netdev_rte_add_clone_flow_action(a, &clone_raw_encap,
@@ -1111,7 +1125,8 @@ netdev_rte_offloads_add_flow(struct netdev *netdev,
             if (result) {
                 break;
             }
-            action_bitmap |= 1 << OVS_ACTION_ATTR_CLONE;
+            // action_bitmap |= 1 << OVS_ACTION_ATTR_CLONE;
+            action_bitmap |= BITMAP(OVS_ACTION_ATTR_CLONE);
 
         } else {
             /* Unsupported action for offloading */
@@ -1130,7 +1145,8 @@ netdev_rte_offloads_add_flow(struct netdev *netdev,
     } else {
         /* For better performance the clone action is offloaded to the
          * vport table, and a jump rule is added to table 0 */
-        if (action_bitmap & (1 << OVS_ACTION_ATTR_CLONE)) {
+        // if (action_bitmap & (1 << OVS_ACTION_ATTR_CLONE)) {
+        if (action_bitmap & BITMAP(OVS_ACTION_ATTR_CLONE)) {
             flow = netdev_dpdk_add_jump_to_non_root_table(netdev, info);
             VLOG_DBG("Flow with catch-all and jump actions: "
                     "eSwitch offload was %s", flow ? "succeeded" : "failed");
@@ -1212,12 +1228,15 @@ netdev_rte_offloads_validate_flow(const struct match *match, bool is_tun)
         goto err;
     }
 
+#if 0
     /* recirc id must be zero. */
     if (match_zero_wc.flow.recirc_id) {
         goto err;
     }
+#endif
 
-    if (masks->ct_state || masks->ct_nw_proto ||
+    if ((masks->ct_state && !(masks->ct_state & CS_ESTABLISHED)) ||
+        masks->ct_nw_proto ||
         masks->ct_zone  || masks->ct_mark     ||
         !ovs_u128_is_zero(masks->ct_label)) {
         goto err;
@@ -1544,7 +1563,8 @@ netdev_vport_vxlan_add_rte_flow_offload(struct netdev_rte_port *rte_port,
             if (ret) {
                 continue;
             }
-            action_bitmap |= (1 << OVS_ACTION_ATTR_OUTPUT);
+            // action_bitmap |= (1 << OVS_ACTION_ATTR_OUTPUT);
+            action_bitmap |= BITMAP(OVS_ACTION_ATTR_OUTPUT);
         } else if ((enum ovs_action_attr)type == OVS_ACTION_ATTR_CT) {
             const struct nlattr *b;
             unsigned int ct_left;
@@ -1576,13 +1596,15 @@ netdev_vport_vxlan_add_rte_flow_offload(struct netdev_rte_port *rte_port,
                         OVS_NOT_REACHED();
                 }
             }
-            action_bitmap |= (1 << OVS_ACTION_ATTR_CT);
+            // action_bitmap |= (1 << OVS_ACTION_ATTR_CT);
+            action_bitmap |= BITMAP(OVS_ACTION_ATTR_CT);
         } else if ((enum ovs_action_attr)type == OVS_ACTION_ATTR_RECIRC) {
-            if (!(ovs_action_attr & (1 << OVS_ACTION_ATTR_CT))) {
+            if (!(action_bitmap & BITMAP(OVS_ACTION_ATTR_CT))) {
                 ret = EOPNOTSUPP;
-		goto out;
-	    }
-            action_bitmap |= (1 << OVS_ACTION_ATTR_RECIRC);
+                goto out;
+            }
+            // action_bitmap |= (1 << OVS_ACTION_ATTR_RECIRC);
+            action_bitmap |= BITMAP(OVS_ACTION_ATTR_RECIRC);
         } else {
             /* Unsupported action for offloading */
             ret = EOPNOTSUPP;
@@ -1600,7 +1622,8 @@ netdev_vport_vxlan_add_rte_flow_offload(struct netdev_rte_port *rte_port,
             free_flow_actions(&actions);
             netdev_rte_add_decap_flow_action(&actions);
 
-            if (action_bitmap & (1 << OVS_ACTION_ATTR_OUTPUT)) {
+            // if (action_bitmap & (1 << OVS_ACTION_ATTR_OUTPUT)) {
+            if (action_bitmap & BITMAP(OVS_ACTION_ATTR_OUTPUT)) {
                 netdev_rte_add_count_flow_action(&count, &actions);
                 netdev_rte_add_port_id_flow_action(&port_id, &actions);
             }
@@ -1724,7 +1747,7 @@ netdev_rte_offloads_port_add(struct netdev *netdev, odp_port_t dp_port)
         if (!rte_port) {
             goto out;
         }
-        rte_port->table_id = VXLAN_TABLE_ID;
+        rte_port->table_id = vxlan_table_id;
         rte_port->exception_mark = VXLAN_EXCEPTION_MARK;
 
         cmap_insert(&mark_to_rte_port,
