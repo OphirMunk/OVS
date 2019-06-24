@@ -6581,6 +6581,15 @@ packet_batch_per_flow_execute(struct packet_batch_per_flow *batch,
 
     actions = dp_netdev_flow_get_actions(flow);
 
+    /* OZ:
+     *if (tc_hw_flow(flow)) {
+	     modify the action list (actions)
+     }
+     *
+     * Also used needs to be updated
+     *
+     */
+
     dp_netdev_execute_actions(pmd, &batch->array, true, &flow->flow,
                               actions->actions, actions->size);
 }
@@ -6772,6 +6781,16 @@ dfc_processing(struct dp_netdev_pmd_thread *pmd,
                 miniflow_extract(packet, &key->mf);
                 netdev_rte_offload_preprocess(packet, mark);
             }
+
+	    /*OZ:
+	     *if (ct_flow) {
+		state = state_from_ufid(ufid)
+	     	restore metadata (ct_mark,ct_label,+est,tunnel info)
+	     }
+
+	     *
+	     */
+
         }
 
         miniflow_extract(packet, &key->mf);
