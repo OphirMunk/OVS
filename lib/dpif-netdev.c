@@ -6583,7 +6583,7 @@ packet_batch_per_flow_execute(struct packet_batch_per_flow *batch,
 
     /* OZ:
      *if (tc_hw_flow(flow)) {
-	     modify the action list (actions)
+             modify the action list (actions)
      }
      *
      * Also used needs to be updated
@@ -6782,14 +6782,14 @@ dfc_processing(struct dp_netdev_pmd_thread *pmd,
                 netdev_rte_offload_preprocess(packet, mark);
             }
 
-	    /*OZ:
-	     *if (ct_flow) {
-		state = state_from_ufid(ufid)
-	     	restore metadata (ct_mark,ct_label,+est,tunnel info)
-	     }
+            /*OZ:
+             *if (ct_flow) {
+                state = state_from_ufid(ufid)
+                     restore metadata (ct_mark,ct_label,+est,tunnel info)
+             }
 
-	     *
-	     */
+             *
+             */
 
         }
 

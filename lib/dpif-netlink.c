@@ -668,7 +668,7 @@ get_vport_type(const struct dpif_netlink_vport *vport)
 
     switch (vport->type) {
     case OVS_VPORT_TYPE_NETDEV: {
-        const char *type = netdev_get_type_from_name(vport->name);
+        const char *type = netdev_get_type_from_name(vport->name); // OMTODO - how to know tunnel is of vxlan
 
         return type ? type : "system";
     }
@@ -2010,7 +2010,7 @@ parse_flow_put(struct dpif_netlink *dpif, struct dpif_flow_put *put)
     }
 
     in_port = match.flow.in_port.odp_port;
-    dev = netdev_ports_get(in_port, dpif_class);
+    dev = netdev_ports_get(in_port, dpif_class); // OMTODO - how to know if a tunnel is of vxlan type
     if (!dev) {
         return EOPNOTSUPP;
     }
