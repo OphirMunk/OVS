@@ -2623,6 +2623,7 @@ dp_ct_alloc_ct_offload(struct ct_flow_offload_item *ct_offload,
     return offload;
 }
 
+static void ct_offload_print_log(struct ct_flow_offload_item *item) OVS_UNUSED;
 static void ct_offload_print_log(struct ct_flow_offload_item *item)
 {
     struct ovs_key_ct_tuple_ipv4 * ipv4 = &item->ct_key.ipv4;
@@ -2649,6 +2650,7 @@ static void ct_offload_print_log(struct ct_flow_offload_item *item)
             ntohs(ipv4->dst_port));
 
 }
+
 /**
  * callback
  *

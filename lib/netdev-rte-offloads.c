@@ -57,6 +57,11 @@ enum rte_port_type {
     RTE_PORT_TYPE_VXLAN
 };
 
+#define INVALID_OUTER_ID  0Xffffffff
+#define INVALID_HW_ID     0Xffffffff
+#define MAX_OUTER_ID  0xffff
+#define MAX_HW_TABLE (0xff00)
+
 /*
  * A mapping from dp_port to flow parameters.
  */
@@ -96,10 +101,9 @@ netdev_rte_port_search(odp_port_t dp_port, struct cmap *map)
     return NULL;
 }
 
-// static void
-// netdev_dpdk_offload_put_handle(struct match *match, struct nlattr *actions,
-//        size_t actions_len, uint32_t flow_mark);
-
+static void
+netdev_dpdk_offload_put_handle(struct match *match, struct nlattr *actions,
+                               size_t actions_len, uint32_t flow_mark);
 
 /*
  * Allocate a new entry in port_map for dp_port (if not already allocated)
@@ -1249,13 +1253,6 @@ netdev_rte_offloads_validate_flow(const struct match *match,
         goto err;
     }
 
-#if 0
-    /* recirc id must be zero. */
-    if (match_zero_wc.flow.recirc_id) {
-        goto err;
-    }
-#endif
-
     if ((masks->ct_state && !(masks->ct_state & CS_ESTABLISHED)) ||
         masks->ct_nw_proto ||
         masks->ct_zone  || masks->ct_mark     ||
@@ -1302,66 +1299,28 @@ err:
     return -1;
 }
 
+static int
+netdev_add_rte_flow_offload(struct netdev *netdev OVS_UNUSED,
+                            struct match *match,
+                            struct nlattr *nl_actions,
+                            size_t actions_len,
+                            const ovs_u128 *ufid,
+                            struct offload_info *info OVS_UNUSED,
+                            struct dpif_flow_stats *stats OVS_UNUSED,
+                            bool vport,
+                            int odp_to_rte_flow_ratio);
 int
 netdev_rte_offloads_flow_put(struct netdev *netdev, struct match *match,
                              struct nlattr *actions, size_t actions_len,
                              const ovs_u128 *ufid, struct offload_info *info,
                              struct dpif_flow_stats *stats OVS_UNUSED)
 {
-    struct rte_flow *rte_flow;
-    int ret;
+    int ret = 0;
 
-    odp_port_t in_port = match->flow.in_port.odp_port;
-    struct netdev_rte_port *rte_port =
-        netdev_rte_port_search(in_port, &port_map);
+    ret = netdev_add_rte_flow_offload(netdev, match, actions, actions_len, ufid,
+                                      info, stats, false, 1);
 
-    if (!rte_port) {
-        VLOG_WARN("Failed to find dpdk port number %d.", in_port);
-        return EINVAL;
-    }
-
-    /*
-     * If an old rte_flow exists, it means it's a flow modification.
-     * Here destroy the old rte flow first before adding a new one.
-     */
-    struct ufid_hw_offload *ufid_hw_offload =
-            ufid_hw_offload_find(ufid, &rte_port->ufid_to_rte);
-
-    if (ufid_hw_offload) {
-        VLOG_DBG("got modification and destroying previous rte_flow");
-        ufid_hw_offload_remove(ufid, &rte_port->ufid_to_rte);
-        ret = netdev_rte_port_ufid_hw_offload_free(ufid_hw_offload);
-        if (ret < 0) {
-            return -ret;
-        }
-    }
-
-    /* Create ufid_to_rte map for the ufid */
-    ufid_hw_offload = netdev_rte_port_ufid_hw_offload_alloc(1, ufid);
-    if (!ufid_hw_offload) {
-        VLOG_WARN("failed to allocate ufid_hw_offlaod, OOM");
-        return ENOMEM;
-    }
-
-    ufid_hw_offload_add(ufid_hw_offload, &rte_port->ufid_to_rte);
-    ufid_to_portid_add(ufid, rte_port->dp_port);
-
-    ret = netdev_rte_offloads_validate_flow(match, false);
-//    netdev_dpdk_offload_put_handle(match, actions,
-//        actions_len,0);
-    if (ret < 0) {
-        VLOG_DBG("flow pattern is not supported");
-        return EINVAL;
-    }
-
-    rte_flow = netdev_rte_offloads_add_flow(netdev, match, actions,
-                                            actions_len, ufid, info);
-    if (!rte_flow) {
-        return ENODEV;
-    }
-
-    ufid_hw_offload_add_rte_flow(ufid_hw_offload, rte_flow, netdev);
-    return 0;
+    return ret;
 }
 
 static int
@@ -1407,6 +1366,8 @@ netdev_rte_vport_flow_del(struct netdev *netdev OVS_UNUSED,
     return netdev_offloads_flow_del(ufid);
 }
 
+static uint32_t netdev_dpdk_tun_id_get_ref(ovs_be32 ip_dst, ovs_be32 ip_src,
+                                           ovs_be64 tun_id);
 static int
 add_vport_vxlan_flow_patterns(struct flow_patterns *patterns,
                               struct flow_items *spec,
@@ -1441,6 +1402,10 @@ add_vport_vxlan_flow_patterns(struct flow_patterns *patterns,
         mask->ipv4.hdr.dst_addr        = match->wc.masks.tunnel.ip_dst;
         add_flow_pattern(patterns, RTE_FLOW_ITEM_TYPE_IPV4, &spec->ipv4,
                          &mask->ipv4);
+
+        ovs_be64 tun_id = match->flow.tunnel.tun_id;
+        ovs_be64 tun_id_mask = match->wc.masks.tunnel.tun_id;
+        // OMREVIEW: add_flow_pattern(patterns, RTE_FLOW_ITEM_MD, (tun_id & tun_id_mask));
 
         /* Save proto for L4 protocol setup */
         proto = spec->ipv4.hdr.next_proto_id &
@@ -1485,6 +1450,17 @@ add_vport_vxlan_flow_patterns(struct flow_patterns *patterns,
     add_flow_pattern(patterns, RTE_FLOW_ITEM_TYPE_VXLAN, &spec->vxlan,
                      &mask->vxlan);
 
+    uint32_t outer_id =
+        netdev_dpdk_tun_id_get_ref(match->flow.tunnel.ip_dst,
+                                   match->flow.tunnel.ip_src,
+                                   match->flow.tunnel.tun_id);
+
+    if (outer_id == INVALID_OUTER_ID) {
+        return -1;
+    }
+
+    // OMREVIEW: add_flow_pattern(patterns, RTE_FLOW_MD, outer_id);
+
     return 0;
 }
 
@@ -1494,213 +1470,6 @@ netdev_rte_add_decap_flow_action(struct flow_actions *actions)
     add_flow_action(actions, RTE_FLOW_ACTION_TYPE_VXLAN_DECAP, NULL);
 }
 
-static int
-netdev_vport_vxlan_add_rte_flow_offload(struct netdev_rte_port *rte_port,
-                                        struct match *match,
-                                        struct nlattr *nl_actions,
-                                        size_t actions_len,
-                                        const ovs_u128 *ufid,
-                                        struct offload_info *info,
-                                      struct dpif_flow_stats *stats OVS_UNUSED)
-{
-    if (!actions_len || !nl_actions) {
-        VLOG_DBG("skip flow offload without actions\n");
-        return 0;
-    }
-
-    int ret = 0;
-
-    /* If an old rte_flow exists, it means it's a flow modification.
-    * Here destroy the old rte flow first before adding a new one.
-    */
-    struct ufid_hw_offload *ufid_hw_offload =
-            ufid_hw_offload_find(ufid, &rte_port->ufid_to_rte);
-
-    if (ufid_hw_offload) {
-        VLOG_DBG("got modification and destroying previous rte_flow");
-        ufid_hw_offload_remove(ufid, &rte_port->ufid_to_rte);
-        ret = netdev_rte_port_ufid_hw_offload_free(ufid_hw_offload);
-        if (ret < 0) {
-            return ret;
-        }
-    }
-
-    if (!dpdk_phy_ports_amount) {
-        VLOG_WARN("offload while no phy ports %d",(int)dpdk_phy_ports_amount);
-        return -1;
-    }
-
-    ufid_hw_offload = netdev_rte_port_ufid_hw_offload_alloc(
-            dpdk_phy_ports_amount, ufid);
-    if (ufid_hw_offload == NULL) {
-        VLOG_WARN("failed to allocate ufid_hw_offlaod, OOM");
-        return -1;
-    }
-
-    ufid_hw_offload_add(ufid_hw_offload, &rte_port->ufid_to_rte);
-    ufid_to_portid_add(ufid, rte_port->dp_port);
-
-    struct rte_flow_attr flow_attr = {
-        .group = rte_port->table_id,
-        .priority = 0,
-        .ingress = 1,
-        .egress = 0,
-        .transfer = 0
-    };
-
-    struct flow_patterns patterns = { .items = NULL, .cnt = 0 };
-    struct flow_items spec_outer, mask_outer;
-
-    memset(&spec_outer, 0, sizeof spec_outer);
-    memset(&mask_outer, 0, sizeof mask_outer);
-
-    /* Add patterns from outer header */
-    ret = add_vport_vxlan_flow_patterns(&patterns, &spec_outer,
-                                        &mask_outer, match);
-    if (ret) {
-        goto out;
-    }
-
-    struct flow_items spec, mask;
-    memset(&spec, 0, sizeof spec);
-    memset(&mask, 0, sizeof mask);
-
-    /* Add patterns from inner header */
-    ret = add_flow_patterns(&patterns, &spec, &mask, match);
-    if (ret) {
-        goto out;
-    }
-
-    add_flow_pattern(&patterns, RTE_FLOW_ITEM_TYPE_END, NULL, NULL);
-
-    struct rte_flow *flow = NULL;
-    struct flow_actions actions = { .actions = NULL, .cnt = 0 };
-    struct rte_flow_action_port_id port_id;
-    struct rte_flow_action_count count;
-
-    /* Actions in nl_actions will be asserted in this bitmap,
-     * according to their values in ovs_action_attr enum */
-    uint64_t action_bitmap = 0;
-
-    const struct nlattr *a;
-    unsigned int left;
-
-    NL_ATTR_FOR_EACH_UNSAFE (a, left, nl_actions, actions_len) {
-        int type = nl_attr_type(a);
-        if ((enum ovs_action_attr)type == OVS_ACTION_ATTR_OUTPUT) {
-            ret = get_output_port(a, &port_id);
-            if (ret) {
-                continue;
-            }
-            // action_bitmap |= (1 << OVS_ACTION_ATTR_OUTPUT);
-            action_bitmap |= ACTBIT (OVS_ACTION_ATTR_OUTPUT);
-        } else if ((enum ovs_action_attr)type == OVS_ACTION_ATTR_CT) {
-            const struct nlattr *b;
-            unsigned int ct_left;
-            uint16_t zone = 0;
-
-            NL_ATTR_FOR_EACH_UNSAFE (b, ct_left, nl_attr_get(a),
-                    nl_attr_get_size(a)) {
-                enum ovs_ct_attr sub_type = nl_attr_type(b);
-
-                switch(sub_type) {
-                    case OVS_CT_ATTR_ZONE:
-                    /* currently only support zone 0 */
-                        zone = nl_attr_get_u16(b);
-                        if (zone) {
-                            ret = EOPNOTSUPP;
-                            goto out;
-                        }
-                        break;
-                    case OVS_CT_ATTR_COMMIT:
-                    case OVS_CT_ATTR_FORCE_COMMIT:
-                    case OVS_CT_ATTR_HELPER:
-                    case OVS_CT_ATTR_MARK:
-                    case OVS_CT_ATTR_LABELS:
-                    case OVS_CT_ATTR_EVENTMASK:
-                    case OVS_CT_ATTR_NAT:
-                       break;
-                    case OVS_CT_ATTR_UNSPEC:
-                    case __OVS_CT_ATTR_MAX:
-                        OVS_NOT_REACHED();
-                }
-            }
-            // action_bitmap |= (1 << OVS_ACTION_ATTR_CT);
-            action_bitmap |= ACTBIT (OVS_ACTION_ATTR_CT);
-        } else if ((enum ovs_action_attr)type == OVS_ACTION_ATTR_RECIRC) {
-            if (!(action_bitmap & ACTBIT (OVS_ACTION_ATTR_CT))) {
-                ret = EOPNOTSUPP;
-                goto out;
-            }
-            // action_bitmap |= (1 << OVS_ACTION_ATTR_RECIRC);
-            action_bitmap |= ACTBIT (OVS_ACTION_ATTR_RECIRC);
-        } else {
-            /* Unsupported action for offloading */
-            ret = EOPNOTSUPP;
-            goto out;
-        }
-    }
-
-    struct netdev_rte_port *data;
-    struct rte_flow_error error;
-    CMAP_FOR_EACH (data, node, &port_map) {
-        /* Offload only in case the port is DPDK and it's the uplink port */
-        if ((data->rte_port_type == RTE_PORT_TYPE_DPDK) &&
-            (netdev_dpdk_is_uplink_port(data->netdev))) {
-
-            free_flow_actions(&actions);
-            netdev_rte_add_decap_flow_action(&actions);
-
-            // if (action_bitmap & (1 << OVS_ACTION_ATTR_OUTPUT))
-            if (action_bitmap & ACTBIT (OVS_ACTION_ATTR_OUTPUT)) {
-                netdev_rte_add_count_flow_action(&count, &actions);
-                netdev_rte_add_port_id_flow_action(&port_id, &actions);
-            }
-
-            add_flow_action(&actions, RTE_FLOW_ACTION_TYPE_END, NULL);
-
-            flow_attr.transfer = 1;
-            flow = netdev_dpdk_rte_flow_create(data->netdev,
-                                               &flow_attr, patterns.items,
-                                               actions.actions, &error);
-            VLOG_DBG("eSwitch offload was %s", flow ? "succeeded" : "failed");
-
-            if (flow) {
-                info->is_hwol = true;
-            } else {
-                VLOG_ERR("%s: rte flow create offload error: %u : "
-                        "message : %s\n", netdev_get_name(data->netdev),
-                        error.type, error.message);
-
-                /* In case flow cannot be offloaded with decap and output
-                 * actions, try to offload decap with mark and rss, and output
-                 * will be done in SW */
-                free_flow_actions(&actions);
-
-                netdev_rte_add_decap_flow_action(&actions);
-                flow_attr.transfer = 0;
-                flow = netdev_rte_offload_mark_rss(data->netdev,
-                                                   info, &patterns, &actions,
-                                                   NULL, &flow_attr);
-                VLOG_DBG("NIC offload was %s", flow ? "succeeded" : "failed");
-                if (flow) {
-                    info->is_hwol = false;
-                }
-            }
-
-            if (flow) {
-                ufid_hw_offload_add_rte_flow(ufid_hw_offload, flow,
-                                             rte_port->netdev);
-            }
-        }
-    }
-
-out:
-    free_flow_patterns(&patterns);
-    return ret;
-}
-
-// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 static uint32_t
 get_output_table_id(struct match *match, uint64_t action_bitmap, bool vport)
 {
@@ -1738,13 +1507,14 @@ netdev_dpdk_set_one_flow(struct flow_patterns *patterns,
                          struct ufid_hw_offload *ufid_hw_offload,
                          struct netdev *netdev)
 {
-    struct netdev_rte_port *data;
     struct rte_flow_error error;
+#if 0
+    struct netdev_rte_port *data;
     CMAP_FOR_EACH (data, node, &port_map) {
         /* Offload only in case the port is DPDK and it's the uplink port */
         if ((data->rte_port_type == RTE_PORT_TYPE_DPDK) &&
             (netdev_dpdk_is_uplink_port(data->netdev))) {
-#if 0
+
             free_flow_actions(&actions);
             netdev_rte_add_decap_flow_action(&actions);
 
@@ -1793,8 +1563,10 @@ netdev_dpdk_set_one_flow(struct flow_patterns *patterns,
             if (flow) {
                 ufid_hw_offload_add_rte_flow(ufid_hw_offload, flow, netdev);
             }
+#if 0
         }
     }
+#endif
 }
 
 static void
@@ -1822,6 +1594,13 @@ netdev_dpdk_set_flows(struct flow_patterns *patterns,
     }
 }
 
+#define IS_MATCH_OFFLOAD_TYPE_VPORT_ROOT(match, vport) \
+    (!match->flow.recirc_id && vport)
+#define IS_MATCH_OFFLOAD_TYPE_ROOT(match, vport) \
+    (!match->flow.recirc_id && !vport)
+#define IS_MATCH_OFFLOAD_TYPE_RECIRC(match) \
+    (!!match->flow.recirc_id)
+
 static int
 netdev_add_rte_flow_offload(struct netdev *netdev OVS_UNUSED,
                             struct match *match,
@@ -1845,6 +1624,8 @@ netdev_add_rte_flow_offload(struct netdev *netdev OVS_UNUSED,
         VLOG_DBG("flow pattern is not supported");
         return -EOPNOTSUPP;
     }
+
+    // netdev_dpdk_offload_put_handle(match, nl_actions, actions_len, 0);
 
     odp_port_t in_port = match->flow.in_port.odp_port;
     struct netdev_rte_port *rte_port =
@@ -1958,15 +1739,18 @@ OMREVIEW: memset is done inside add_vport_vxlan_flow_patterns()
         if ((enum ovs_action_attr) type == OVS_ACTION_ATTR_TUNNEL_POP) {
             /*
              * 1. Tunnel pop action must be unique with no other actions.
-             * 2. Recirc_id must be 0.
-             * 3. Tunnel must be of vxlan type.
+             * 2. It is vport.
+             * 3. Recirc_id must be 0.
+             * 4. Tunnel must be of vxlan type.
              *    OMREVIEW - TBD. Look in lib/dpif-netlink.c for examples
-             * 4. Tunnel pop must be the last one. OMREVIEW - TBD
-             * 5. Must be on physical port.
+             * 5. Tunnel pop must be the last action.
+             * 6. Tunnel pop must be on physical port.
              */
             if (action_bitmap ||
-                match->flow.recirc_id ||
-                vport) {
+                !IS_MATCH_OFFLOAD_TYPE_VPORT_ROOT (match, vport) ||
+                // match->flow.recirc_id ||
+                // vport ||
+                (left > NLA_ALIGN(a->nla_len))) {
                 goto out;
             }
 
@@ -1982,7 +1766,9 @@ OMREVIEW: memset is done inside add_vport_vxlan_flow_patterns()
             VLOG_DBG("eSwitch offload was %s", flow ? "succeeded" : "failed");
         } else if ((enum ovs_action_attr) type == OVS_ACTION_ATTR_OUTPUT) {
             /* Output action must be the last one */
-            // TBD
+            if (left > NLA_ALIGN(a->nla_len)) {
+                goto out;
+            }
 
             table_id = get_output_table_id(match, action_bitmap, vport);
             if (table_id == UNKNOWN_TABLE_ID) {
@@ -2004,7 +1790,8 @@ OMREVIEW: memset is done inside add_vport_vxlan_flow_patterns()
             unsigned int cl_left;
             // uint16_t zone = 0;
 
-            if (match->flow.recirc_id || vport) {
+            // if (match->flow.recirc_id || vport) {
+            if (!IS_MATCH_OFFLOAD_TYPE_ROOT (match, vport)) {
                 goto out;
             }
             NL_ATTR_FOR_EACH_UNSAFE (cla, cl_left, nl_attr_get(a),
@@ -2061,7 +1848,8 @@ OMREVIEW: memset is done inside add_vport_vxlan_flow_patterns()
                 ret = EOPNOTSUPP;
                 goto out;
             }
-            // OMREVIEW: handle recycle id
+            // OMREVIEW: handle recycle id. Follow the call:
+            // netdev_dpdk_offload_add_recirc_patterns(struct flow_patterns *patterns, struct match *match);
             action_bitmap |= ACTBIT (OVS_ACTION_ATTR_RECIRC);
         } else {
             /* Unsupported action for offloading */
@@ -2078,7 +1866,6 @@ out:
     free_flow_actions(&actions);
     return ret;
 }
-// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 static int
 netdev_rte_vport_flow_put(struct netdev *netdev OVS_UNUSED,
@@ -2089,26 +1876,10 @@ netdev_rte_vport_flow_put(struct netdev *netdev OVS_UNUSED,
                  struct offload_info *info,
                  struct dpif_flow_stats *stats)
 {
-    if (netdev_rte_offloads_validate_flow(match, true)) {
-        VLOG_DBG("flow pattern is not supported");
-        return EOPNOTSUPP;
-    }
-
     int ret = 0;
-    odp_port_t in_port = match->flow.in_port.odp_port;
-    struct netdev_rte_port *rte_port = netdev_rte_port_search(in_port,
-                                                              &port_map);
-    if (rte_port != NULL) {
-        if (rte_port->rte_port_type == RTE_PORT_TYPE_VXLAN) {
-            VLOG_DBG("vxlan offload ufid "UUID_FMT" \n",
-                     UUID_ARGS((struct uuid *)ufid));
-             ret = netdev_vport_vxlan_add_rte_flow_offload(rte_port, match,
-                              actions, actions_len, ufid, info, stats);
-        } else {
-            VLOG_DBG("unsupported tunnel type");
-            ovs_assert(true);
-        }
-    }
+
+    ret = netdev_add_rte_flow_offload(netdev, match, actions, actions_len, ufid,
+                                      info, stats, true, dpdk_phy_ports_amount);
 
     return ret;
 }
@@ -2295,11 +2066,6 @@ netdev_rte_offload_preprocess(struct dp_packet *packet, uint32_t mark)
     }
     VLOG_WARN("Exception mark %u with no port", mark);
 }
-
-#define INVALID_OUTER_ID  0Xffffffff
-#define INVALID_HW_ID     0Xffffffff
-#define MAX_OUTER_ID  0xffff
-#define MAX_HW_TABLE (0xff00)
 
 /* TEMPORAL should be del once ready on dpdk */
 struct rte_flow_action_set_tag {
@@ -2800,7 +2566,7 @@ struct hw_table_id {
     struct cmap recirc_id_to_tbl_id_map;
     struct cmap port_id_to_tbl_id_map;
     struct id_pool *pool;
-    uint32_t hw_id_to_sw[MAX_OUTER_ID]
+    uint32_t hw_id_to_sw[MAX_OUTER_ID];
 };
 
 struct hw_table_id hw_table_id = {
@@ -3131,6 +2897,7 @@ static int
 netdev_dpdk_offload_add_root_patterns(struct flow_patterns *patterns,
                              struct match *match)
 {
+    // OMREVIEW: already implemented as part of the merge
     /*TODO: here we should add all eth/ip/....etc patterns*/
     return 0;
 }
@@ -3162,6 +2929,8 @@ netdev_dpdk_offload_add_recirc_patterns(struct flow_patterns *patterns,
 {
     const struct flow *masks = &match->wc.masks;
 
+    // OMREVIEW: this function will be called from the "pattern" flow.
+    // OMREVIEW: cls_info is not needed. match will be used instead
     /* find available hw_id for recirc_id */
     if (netdev_dpdk_get_recirc_id_hw_id(cls_info->match.recirc_id,
                                         &cls_info->match.hw_id) ==
@@ -3318,16 +3087,19 @@ netdev_dpdk_offload_put_add_actions(struct flow_actions *flow_actions,
     switch (cls_info->actions.type) {
         case ACTION_OFFLOAD_TYPE_TNL_POP:
             /*TODO: need to verify the POP is the only action here.*/
+            // OMREVIEW: this verification and the vxlan actions are implemented as part of the merge
             return  netdev_dpdk_offload_vxlan_actions(flow_actions, cls_info);
         case ACTION_OFFLOAD_TYPE_CT:
             return netdev_dpdk_offload_ct_actions(flow_actions, cls_info,
                                                  actions, actions_len);
             break;
         case ACTION_OFFLOAD_TYPE_OUTPUT:
+            // OMREVIEW: most of the output actions are implemented as part of the merge
             return netdev_dpdk_offload_output_actions(flow_actions, cls_info,
                                                     actions, actions_len);
     }
     VLOG_WARN("unexpected offload action type %d",cls_info->actions.type);
+    // OMREVIEW: but we do want to support decap, header rewrite... 
     return -1;
 }
 
