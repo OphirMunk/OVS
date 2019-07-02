@@ -1466,7 +1466,7 @@ conntrack_off_fill_tun(struct ct_flow_offload_item *msg,
     msg->tun.ip_dst = packet->md.tunnel.ip_dst;
     msg->tun.ip_src = packet->md.tunnel.ip_src;
     msg->tun.tun_id = packet->md.tunnel.tun_id;
-    msg->odp_port = packet->in_port.odp_port;
+    msg->odp_port = packet->md.in_port.odp_port;
 }
 
 static void

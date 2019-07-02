@@ -2296,11 +2296,79 @@ netdev_rte_offload_preprocess(struct dp_packet *packet, uint32_t mark)
     VLOG_WARN("Exception mark %u with no port", mark);
 }
 
-
 #define INVALID_OUTER_ID  0Xffffffff
 #define INVALID_HW_ID     0Xffffffff
 #define MAX_OUTER_ID  0xffff
 #define MAX_HW_TABLE (0xff00)
+
+/* TEMPORAL should be del once ready on dpdk */
+struct rte_flow_action_set_tag {
+       uint32_t data;
+       uint32_t mask;
+       uint8_t index;
+};
+
+struct rte_flow_item_tag {
+       uint32_t data;
+       uint32_t mask;
+       uint8_t index;
+};
+/* TEMPORAL should be del once ready on dpdk */
+
+enum {
+    REG_RECIRC_ID = 0,
+    REG_ZONE = 1,
+    REG_MARK =2 ,
+    REG_OUTER_ID =3,
+    REG_STATE = 4,
+    REG_MAX = 5
+};
+
+static int reg_indexs[] = {2,2,3,4,2};
+static int reg_mask  [] = {2,2,3,4,2};
+static int reg_shift [] = {0,16,0,0,24};
+
+static void
+netdev_dpdk_add_pattern_match_reg(struct flow_patterns *patterns, int reg_type,
+                                                                  uint32_t val)
+{
+    if (reg_type > REG_MAX ) {
+        VLOG_ERR("reg type %d is out of range",reg_type);
+        return;
+    }
+
+    struct flow_items {
+        struct rte_flow_item_tag tag;
+    } spec, mask;
+
+    /* TODO: once API is ready should put here the real spec and mask */
+    spec.tag.index = reg_indexs[reg_type];
+    spec.tag.data   = val << reg_shift[reg_type];
+    spec.tag.mask   = reg_mask[reg_type];
+
+    //add_flow_pattern(patterns,
+}
+
+static int
+netdev_dpdk_add_action_set_reg(struct flow_actions *actions, int reg_type,
+                                                                  uint32_t val)
+{
+    if (reg_type > REG_MAX ) {
+        VLOG_ERR("reg type %d is out of range",reg_type);
+        return -1;
+    }
+
+    struct flow_items {
+        struct rte_flow_action_set_tag tag;
+    } spec, mask;
+
+    /* TODO: once API is ready should put here the real spec and mask */    
+    spec.tag.index = reg_indexs[reg_type];
+    spec.tag.data   = val << reg_shift[reg_type];
+    spec.tag.mask   = reg_mask[reg_type];
+
+    return 0;
+}
 
 struct tun_ctx_outer_id_data {
     struct cmap_node node;
@@ -2928,11 +2996,11 @@ netdev_dpdk_offload_fill_cls_info(struct offload_item_cls_info *cls_info,
 
         switch ((enum ovs_action_attr) type) {
             case OVS_ACTION_ATTR_CT: {
-                unsigned int left;
+                unsigned int left_ct;
                 const struct nlattr *b;
                 cls_info->actions.has_ct = true;
 
-                NL_ATTR_FOR_EACH_UNSAFE (b, left, nl_attr_get(a),
+                NL_ATTR_FOR_EACH_UNSAFE (b, left_ct, nl_attr_get(a),
                                  nl_attr_get_size(a)) {
                     enum ovs_ct_attr sub_type = nl_attr_type(b);
 
@@ -2941,9 +3009,12 @@ netdev_dpdk_offload_fill_cls_info(struct offload_item_cls_info *cls_info,
                                 cls_info->actions.has_nat = true;
                                 break;
                             case OVS_CT_ATTR_FORCE_COMMIT:
+                                break;
                             case OVS_CT_ATTR_COMMIT:
+                                break;
                             case OVS_CT_ATTR_ZONE:
                                 cls_info->actions.zone = nl_attr_get_u16(b);
+                                break;
                             case OVS_CT_ATTR_HELPER:
                             case OVS_CT_ATTR_MARK:
                             case OVS_CT_ATTR_LABELS:
@@ -2980,7 +3051,7 @@ netdev_dpdk_offload_fill_cls_info(struct offload_item_cls_info *cls_info,
                     cls_info->actions.odp_port = nl_attr_get_odp_port(a);
                     break;;
                 case OVS_ACTION_ATTR_SET:
-                /*TODO: set baidu eth here.*/
+                /*TODO: set baidu set eth here.*/
 
                 break;
                 case OVS_ACTION_ATTR_CLONE:
@@ -3002,13 +3073,15 @@ netdev_dpdk_offload_fill_cls_info(struct offload_item_cls_info *cls_info,
                 case OVS_ACTION_ATTR_METER:
                 case OVS_ACTION_ATTR_CHECK_PKT_LEN:
                 case OVS_ACTION_ATTR_TUNNEL_PUSH:
+                    /*TODO: replace with counter. so log won't be flooded */
+                    VLOG_WARN("unsupported offload action %d",type);
+                    cls_info->actions.valid = false;
                     break;
                 case __OVS_ACTION_ATTR_MAX:
                 default:
                     VLOG_ERR("action %d",type);
         }
     }
-
 }
 
 static int
@@ -3089,6 +3162,7 @@ netdev_dpdk_offload_add_recirc_patterns(struct flow_patterns *patterns,
 {
     const struct flow *masks = &match->wc.masks;
 
+    /* find available hw_id for recirc_id */
     if (netdev_dpdk_get_recirc_id_hw_id(cls_info->match.recirc_id,
                                         &cls_info->match.hw_id) ==
                                         INVALID_HW_ID) {
@@ -3104,17 +3178,28 @@ netdev_dpdk_offload_add_recirc_patterns(struct flow_patterns *patterns,
         if (cls_info->match.outer_id == INVALID_OUTER_ID) {
             return -1;
         }
-        /* TODO add match on tun_id register. */
+        netdev_dpdk_add_pattern_match_reg(patterns, REG_OUTER_ID,
+                                          cls_info->match.outer_id);
     }
 
-    /* TODO: here we add match on outer_id */
     netdev_dpdk_offload_add_root_patterns(patterns, match);
-    /*TODO: add following patterns: */
+    /* replace md matches with reg matches */
     if (masks->ct_state ||
         masks->ct_zone  || masks->ct_mark) {
-        /*TODO: replace with matching right register */
-    }
+        if (masks->ct_state) {
+            netdev_dpdk_add_pattern_match_reg(patterns, REG_STATE,
+                                              match->flow.ct_state);
+        }
+        if (masks->ct_zone) {
+            netdev_dpdk_add_pattern_match_reg(patterns, REG_ZONE,
+                                              match->flow.ct_zone);
+        }
 
+        if (masks->ct_mark) {
+            netdev_dpdk_add_pattern_match_reg(patterns, REG_MARK,
+                                              match->flow.ct_mark);
+        }
+    }
     return 0;
 }
 
@@ -3168,8 +3253,14 @@ netdev_dpdk_offload_ct_actions(struct flow_actions *flow_actions,
     if (!netdev_dpdk_offload_get_hw_id(cls_info)) {
         return -1;
     }
-    /* TODO: set hw_id in register */
-    /* TODO: add all actions until CT */
+    /* TODO: set hw_id in reg_recirc , will be used by mapping table */
+    if (!netdev_dpdk_add_action_set_reg(flow_actions, REG_RECIRC_ID,
+                                        cls_info->actions.hw_id)) {
+        return -1;
+    }
+    /* TODO: add all actions until CT
+     * read all actions for actions and add them to rte_flow 
+     * can push_vlan, set_eth...etc */
     if (cls_info->actions.has_nat) {
         /* TODO: we need to create the table if doesn't exists */
         /* TODO: jump to nat table */
@@ -3426,10 +3517,14 @@ static int
 netdev_dpdk_add_jump_to_mapping_actions(struct flow_actions *actions
                                         /*, rte_port */)
 {
-    /* each RTE_PORT has mapping table, we need to find its */
-    /* table number and add jump actuion */
-
-
+    struct rte_flow_action_jump jump = {0};
+    /* TODO: fill the right mapping table id */
+    /* TODO: since we hhave one, better to just alloc 
+     * one per port on start, no need for ref count! */
+    int hw_map_tbl_id = 0; 
+    jump.group = hw_map_tbl_id;
+    add_flow_action(actions, RTE_FLOW_ACTION_TYPE_JUMP, &jump);
+    add_flow_action(actions, RTE_FLOW_ACTION_TYPE_END, NULL);
     return 0;
 }
 
@@ -3533,6 +3628,7 @@ netdev_dpdk_offload_ct_session(struct mark_to_miss_ctx_data *data,
 
     if (dir1 == dir2) {
         /* TODO: add warning */
+        VLOG_ERR("got two established events on same dir");
         goto fail;
     }
 
@@ -3556,7 +3652,9 @@ netdev_dpdk_offload_ct_session(struct mark_to_miss_ctx_data *data,
     data->ct.rte_flow[dir2] = flow;
     data->ct.odp_port[dir2] = ct_offload2->odp_port;
 
-    /* TODO: hanlde NAT */
+    /* TODO: hanlde NAT 
+     * for nat we need the exact same match, but we need to add
+     * modify action on the needed header fields */
     return 0;
 fail:
     netdev_dpdk_release_ct_flow(data, dir1);
