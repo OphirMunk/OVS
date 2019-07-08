@@ -28,6 +28,8 @@
 #include "packets.h"
 #include "uuid.h"
 
+#define CT_INTEGRATION 1
+
 #define VXLAN_EXCEPTION_MARK (MIN_RESERVED_MARK + 0)
 #define VXLAN_TABLE_ID       1
 
@@ -1173,8 +1175,9 @@ netdev_rte_offloads_flow_put(struct netdev *netdev, struct match *match,
     params.info = info;
     params.netdev = netdev;
     params.ufid = ufid;
-#ifdef PUT_HANDLE
-    ret = netdev_dpdk_offload_put_handle(params, match, actions, actions_len, 0);
+#ifdef CT_INTEGRATION
+    netdev_dpdk_offload_put_handle(&params, match, actions, actions_len, 0);
+    ret = 0;
 #else
     ret = netdev_rte_offloads_add_flow_patterns(&params, match);
     if (ret) {
@@ -1570,9 +1573,9 @@ netdev_rte_vport_flow_put(struct netdev *netdev OVS_UNUSED,
     ufid_to_portid_add(ufid, rte_port->dp_port);
 
 #ifdef CT_INTEGRATION
-    // OMREVIEW: call ct-integration code
-    // ret = netdev_dpdk_offload_put_handle(params, match, actions, actions_len, 0);
-#endif
+    netdev_dpdk_offload_put_handle(&params, match, actions, actions_len, 0);
+    ret = 0;
+#else
     params.flow_attr.group = rte_port->table_id;
     params.flow_attr.priority = 0,
     params.flow_attr.ingress = 1,
@@ -1592,6 +1595,7 @@ netdev_rte_vport_flow_put(struct netdev *netdev OVS_UNUSED,
                                                        actions,
                                                        actions_len);
     }
+#endif
 out:
     return ret;
 }
